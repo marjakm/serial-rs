@@ -45,14 +45,14 @@ fn wait_fd(fd: c_int, events: c_short, timeout: Duration) -> io::Result<()> {
     let wait = do_poll(&mut fds, timeout);
 
     if wait < 0 {
-        let errno = super::error::errno();
+        let errno = ::posix::error::errno();
 
         let kind = match errno {
             EINTR => io::ErrorKind::Interrupted,
             _ => io::ErrorKind::Other
         };
 
-        return Err(io::Error::new(kind, super::error::error_string(errno)));
+        return Err(io::Error::new(kind, ::posix::error::error_string(errno)));
     }
 
     if wait == 0 {
@@ -64,10 +64,10 @@ fn wait_fd(fd: c_int, events: c_short, timeout: Duration) -> io::Result<()> {
     }
 
     if fds[0].revents & (POLLHUP | POLLNVAL) != 0 {
-        return Err(io::Error::new(io::ErrorKind::BrokenPipe, super::error::error_string(EPIPE)));
+        return Err(io::Error::new(io::ErrorKind::BrokenPipe, ::posix::error::error_string(EPIPE)));
     }
 
-    Err(io::Error::new(io::ErrorKind::Other, super::error::error_string(EIO)))
+    Err(io::Error::new(io::ErrorKind::Other, ::posix::error::error_string(EIO)))
 }
 
 #[cfg(target_os = "linux")]

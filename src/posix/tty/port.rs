@@ -11,7 +11,8 @@ use std::os::unix::prelude::*;
 
 use self::libc::{c_int,c_void,size_t};
 
-use ::{SerialDevice,SerialPortSettings};
+use ::SerialDevice;
+use super::TTYSettings;
 
 
 #[cfg(target_os = "linux")]
@@ -52,12 +53,12 @@ impl TTYPort {
 
         let cstr = match CString::new(path.as_os_str().as_bytes()) {
             Ok(s) => s,
-            Err(_) => return Err(super::error::from_raw_os_error(EINVAL))
+            Err(_) => return Err(::posix::error::from_raw_os_error(EINVAL))
         };
 
         let fd = unsafe { libc::open(cstr.as_ptr(), O_RDWR | O_NOCTTY | O_NONBLOCK, 0) };
         if fd < 0 {
-            return Err(super::error::last_os_error());
+            return Err(::posix::error::last_os_error());
         }
 
         let mut port = TTYPort {
@@ -67,12 +68,12 @@ impl TTYPort {
 
         // get exclusive access to device
         if let Err(err) = ioctl::tiocexcl(port.fd) {
-            return Err(super::error::from_io_error(err))
+            return Err(::posix::error::from_io_error(err))
         }
 
         // clear O_NONBLOCK flag
         if unsafe { libc::fcntl(port.fd, F_SETFL, 0) } < 0 {
-            return Err(super::error::last_os_error());
+            return Err(::posix::error::last_os_error());
         }
 
         // apply initial settings
@@ -92,14 +93,14 @@ impl TTYPort {
 
         match retval {
             Ok(()) => Ok(()),
-            Err(err) => Err(super::error::from_io_error(err))
+            Err(err) => Err(::posix::error::from_io_error(err))
         }
     }
 
     fn read_pin(&mut self, pin: c_int) -> ::Result<bool> {
         match ioctl::tiocmget(self.fd) {
             Ok(pins) => Ok(pins & pin != 0),
-            Err(err) => Err(super::error::from_io_error(err))
+            Err(err) => Err(::posix::error::from_io_error(err))
         }
     }
 }
@@ -123,7 +124,7 @@ impl AsRawFd for TTYPort {
 
 impl io::Read for TTYPort {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        try!(super::poll::wait_read_fd(self.fd, self.timeout));
+        try!(::posix::poll::wait_read_fd(self.fd, self.timeout));
 
         let len = unsafe { libc::read(self.fd, buf.as_ptr() as *mut c_void, buf.len() as size_t) };
 
@@ -138,7 +139,7 @@ impl io::Read for TTYPort {
 
 impl io::Write for TTYPort {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        try!(super::poll::wait_write_fd(self.fd, self.timeout));
+        try!(::posix::poll::wait_write_fd(self.fd, self.timeout));
 
         let len = unsafe { libc::write(self.fd, buf.as_ptr() as *mut c_void, buf.len() as size_t) };
 
@@ -167,7 +168,7 @@ impl SerialDevice for TTYPort {
 
         let mut termios = match termios::Termios::from_fd(self.fd) {
             Ok(t) => t,
-            Err(e) => return Err(super::error::from_io_error(e))
+            Err(e) => return Err(::posix::error::from_io_error(e))
         };
 
         // setup TTY for binary serial port access
@@ -188,11 +189,11 @@ impl SerialDevice for TTYPort {
 
         // write settings to TTY
         if let Err(err) = tcsetattr(self.fd, TCSANOW, &settings.termios) {
-            return Err(super::error::from_io_error(err));
+            return Err(::posix::error::from_io_error(err));
         }
 
         if let Err(err) = tcflush(self.fd, TCIOFLUSH) {
-            return Err(super::error::from_io_error(err));
+            return Err(::posix::error::from_io_error(err));
         }
 
         Ok(())

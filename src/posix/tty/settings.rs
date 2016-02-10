@@ -1,11 +1,17 @@
+extern crate libc;
+extern crate termios;
+extern crate ioctl_rs as ioctl;
+
+use ::SerialPortSettings;
+
 /// Serial port settings for TTY devices.
 #[derive(Copy,Clone)]
 pub struct TTYSettings {
-    termios: termios::Termios
+    pub termios: termios::Termios
 }
 
 impl TTYSettings {
-    fn new(termios: termios::Termios) -> Self {
+    pub fn new(termios: termios::Termios) -> Self {
         TTYSettings {
             termios: termios
         }
@@ -130,12 +136,12 @@ impl SerialPortSettings for TTYSettings {
             ::Baud115200        => B115200,
             ::BaudOther(230400) => B230400,
 
-            ::BaudOther(_) => return Err(super::error::from_raw_os_error(EINVAL))
+            ::BaudOther(_) => return Err(::posix::error::from_raw_os_error(EINVAL))
         };
 
         match cfsetspeed(&mut self.termios, baud) {
             Ok(()) => Ok(()),
-            Err(err) => Err(super::error::from_io_error(err))
+            Err(err) => Err(::posix::error::from_io_error(err))
         }
     }
 
