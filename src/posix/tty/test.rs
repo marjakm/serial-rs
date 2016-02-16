@@ -10,6 +10,15 @@ fn default_settings() -> TTYSettings {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn tty_settings_sets_custom_baud_rate() {
+    let mut settings = default_settings();
+
+    settings.set_baud_rate(::BaudOther(250000)).unwrap();
+    assert_eq!(settings.baud_rate(), Some(::BaudOther(250000)));
+}
+
+#[test]
 fn tty_settings_sets_baud_rate() {
     let mut settings = default_settings();
 

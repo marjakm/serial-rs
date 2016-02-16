@@ -103,6 +103,41 @@ impl TTYPort {
             Err(err) => Err(::posix::error::from_io_error(err))
         }
     }
+
+    fn _write_settings(&mut self, settings: &TTYSettings) -> ::Result<()> {
+        use self::termios::{tcsetattr,tcflush};
+        use self::termios::{TCSANOW,TCIOFLUSH};
+
+        // write settings to TTY
+        if let Err(err) = tcsetattr(self.fd, TCSANOW, &settings.termios) {
+            return Err(::posix::error::from_io_error(err));
+        }
+
+        if let Err(err) = tcflush(self.fd, TCIOFLUSH) {
+            return Err(::posix::error::from_io_error(err));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn _modify_settings(&self, t: &mut self::termios::os::target::termios) -> ::Result<()> {Ok(())}
+
+    #[cfg(target_os = "linux")]
+    fn _modify_settings(&self, t: &mut self::termios::os::target::termios) -> ::Result<()> {
+        use self::termios::tcgets2;
+        use self::termios::os::target::{BOTHER, CBAUD};
+        let mut t2 = unsafe { ::std::mem::zeroed() };
+        if let Err(err) = tcgets2(self.fd, &mut t2) {
+            return Err(::posix::error::from_io_error(err));
+        }
+        if (t2.c_cflag & CBAUD) == BOTHER {
+            t.c_cflag  = t2.c_cflag;
+            t.c_ispeed = t2.c_ispeed;
+            t.c_ospeed = t2.c_ospeed;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for TTYPort {
@@ -170,6 +205,7 @@ impl SerialDevice for TTYPort {
             Ok(t) => t,
             Err(e) => return Err(::posix::error::from_io_error(e))
         };
+        try!(self._modify_settings(&mut termios));
 
         // setup TTY for binary serial port access
         termios.c_cflag |= CREAD | CLOCAL;
@@ -183,19 +219,33 @@ impl SerialDevice for TTYPort {
         Ok(TTYSettings::new(termios))
     }
 
+
+    #[cfg(not(target_os = "linux"))]
     fn write_settings(&mut self, settings: &TTYSettings) -> ::Result<()> {
-        use self::termios::{tcsetattr,tcflush};
-        use self::termios::{TCSANOW,TCIOFLUSH};
+        self._write_settings(settings)
+    }
 
-        // write settings to TTY
-        if let Err(err) = tcsetattr(self.fd, TCSANOW, &settings.termios) {
-            return Err(::posix::error::from_io_error(err));
+
+    #[cfg(target_os = "linux")]
+    fn write_settings(&mut self, settings: &TTYSettings) -> ::Result<()> {
+        use self::termios::{tcsets2, tcgets2};
+        use self::termios::os::target::{BOTHER, CBAUD};
+        try!(self._write_settings(settings));
+        if (settings.termios.c_cflag & CBAUD) == BOTHER {
+            let mut t2 = unsafe { ::std::mem::zeroed() };
+            if let Err(err) = tcgets2(self.fd, &mut t2) {
+                return Err(::posix::error::from_io_error(err));
+            }
+            t2.c_cflag  = settings.termios.c_cflag;
+            t2.c_ispeed = settings.termios.c_ispeed;
+            t2.c_ospeed = settings.termios.c_ospeed;
+            if let Err(err) = tcsets2(self.fd, &t2) {
+                return Err(::posix::error::from_io_error(err));
+            }
+            if let Err(err) = tcgets2(self.fd, &mut t2) {
+                return Err(::posix::error::from_io_error(err));
+            }
         }
-
-        if let Err(err) = tcflush(self.fd, TCIOFLUSH) {
-            return Err(::posix::error::from_io_error(err));
-        }
-
         Ok(())
     }
 

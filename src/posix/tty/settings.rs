@@ -2,10 +2,11 @@ extern crate libc;
 extern crate termios;
 extern crate ioctl_rs as ioctl;
 
+use self::termios::speed_t;
 use ::SerialPortSettings;
 
 /// Serial port settings for TTY devices.
-#[derive(Copy,Clone)]
+#[derive(Copy,Clone,Debug)]
 pub struct TTYSettings {
     pub termios: termios::Termios
 }
@@ -16,6 +17,39 @@ impl TTYSettings {
             termios: termios
         }
     }
+
+    #[cfg(target_os = "linux")]
+    fn set_custom_baud_rate(&mut self, baud: usize) -> ::Result<()> {
+        use self::termios::os::target::{BOTHER, CBAUD};
+        self.termios.c_cflag &= !CBAUD;
+        self.termios.c_cflag |= BOTHER;
+        self.termios.c_ispeed = baud as speed_t;
+        self.termios.c_ospeed = baud as speed_t;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn set_custom_baud_rate(&mut self, _baud: usize) -> ::Result<speed_t> {
+        Err(super::error::from_raw_os_error(self::libc::EINVAL))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn get_custom_baud_rate(&self) -> Result<Option<::BaudRate>, ()> {
+        use self::termios::os::target::{BOTHER, CBAUD};
+        if (self.termios.c_cflag & CBAUD) == BOTHER {
+            if self.termios.c_ispeed == self.termios.c_ospeed {
+                return Ok(Some(::BaudOther(self.termios.c_ispeed as usize)))
+            } else {
+                return Err(())
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn get_custom_baud_rate(&self) -> Result<Option<::BaudRate>> {
+        Ok(None)
+    }
 }
 
 impl SerialPortSettings for TTYSettings {
@@ -24,34 +58,39 @@ impl SerialPortSettings for TTYSettings {
         use self::termios::{B50,B75,B110,B134,B150,B200,B300,B600,B1200,B1800,B2400,B4800,B9600,B19200,B38400};
         use self::termios::os::target::{B57600,B115200,B230400};
 
-        let ospeed = cfgetospeed(&self.termios);
-        let ispeed = cfgetispeed(&self.termios);
+        match self.get_custom_baud_rate() {
+            res @ Ok(Some(_)) => res.unwrap(),
+            Err(_) => None,
+            Ok(None) => {
+                let ospeed = cfgetospeed(&self.termios);
+                let ispeed = cfgetispeed(&self.termios);
 
-        if ospeed != ispeed {
-            return None
-        }
+                if ospeed != ispeed {
+                    return None
+                }
 
-        match ospeed {
-            B50     => Some(::BaudOther(50)),
-            B75     => Some(::BaudOther(75)),
-            B110    => Some(::Baud110),
-            B134    => Some(::BaudOther(134)),
-            B150    => Some(::BaudOther(150)),
-            B200    => Some(::BaudOther(200)),
-            B300    => Some(::Baud300),
-            B600    => Some(::Baud600),
-            B1200   => Some(::Baud1200),
-            B1800   => Some(::BaudOther(1800)),
-            B2400   => Some(::Baud2400),
-            B4800   => Some(::Baud4800),
-            B9600   => Some(::Baud9600),
-            B19200  => Some(::Baud19200),
-            B38400  => Some(::Baud38400),
-            B57600  => Some(::Baud57600),
-            B115200 => Some(::Baud115200),
-            B230400 => Some(::BaudOther(230400)),
-
-            _ => None
+                match ospeed {
+                    B50     => Some(::BaudOther(50)),
+                    B75     => Some(::BaudOther(75)),
+                    B110    => Some(::Baud110),
+                    B134    => Some(::BaudOther(134)),
+                    B150    => Some(::BaudOther(150)),
+                    B200    => Some(::BaudOther(200)),
+                    B300    => Some(::Baud300),
+                    B600    => Some(::Baud600),
+                    B1200   => Some(::Baud1200),
+                    B1800   => Some(::BaudOther(1800)),
+                    B2400   => Some(::Baud2400),
+                    B4800   => Some(::Baud4800),
+                    B9600   => Some(::Baud9600),
+                    B19200  => Some(::Baud19200),
+                    B38400  => Some(::Baud38400),
+                    B57600  => Some(::Baud57600),
+                    B115200 => Some(::Baud115200),
+                    B230400 => Some(::BaudOther(230400)),
+                    _       => None
+                }
+            }
         }
     }
 
@@ -111,7 +150,6 @@ impl SerialPortSettings for TTYSettings {
     }
 
     fn set_baud_rate(&mut self, baud_rate: ::BaudRate) -> ::Result<()> {
-        use self::libc::{EINVAL};
         use self::termios::cfsetspeed;
         use self::termios::{B50,B75,B110,B134,B150,B200,B300,B600,B1200,B1800,B2400,B4800,B9600,B19200,B38400};
         use self::termios::os::target::{B57600,B115200,B230400};
@@ -135,8 +173,7 @@ impl SerialPortSettings for TTYSettings {
             ::Baud57600         => B57600,
             ::Baud115200        => B115200,
             ::BaudOther(230400) => B230400,
-
-            ::BaudOther(_) => return Err(::posix::error::from_raw_os_error(EINVAL))
+            ::BaudOther(b)      => return self.set_custom_baud_rate(b)
         };
 
         match cfsetspeed(&mut self.termios, baud) {
