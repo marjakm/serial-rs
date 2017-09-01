@@ -105,6 +105,41 @@ impl TTYPort {
             Err(err) => Err(super::error::from_io_error(err)),
         }
     }
+
+    fn _write_settings(&mut self, settings: &TTYSettings) -> core::Result<()> {
+        use termios::{tcsetattr, tcflush};
+        use termios::{TCSANOW, TCIOFLUSH};
+
+        // write settings to TTY
+        if let Err(err) = tcsetattr(self.fd, TCSANOW, &settings.termios) {
+            return Err(super::error::from_io_error(err));
+        }
+
+        if let Err(err) = tcflush(self.fd, TCIOFLUSH) {
+            return Err(super::error::from_io_error(err));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn _modify_settings(&self, t: &mut self::termios::os::target::termios) -> core::Result<()> {Ok(())}
+
+    #[cfg(target_os = "linux")]
+    fn _modify_settings(&self, t: &mut self::termios::os::target::termios) -> core::Result<()> {
+        use self::termios::tcgets2;
+        use self::termios::os::target::{BOTHER, CBAUD};
+        let mut t2 = unsafe { ::std::mem::zeroed() };
+        if let Err(err) = tcgets2(self.fd, &mut t2) {
+            return Err(super::error::from_io_error(err));
+        }
+        if (t2.c_cflag & CBAUD) == BOTHER {
+            t.c_cflag  = t2.c_cflag;
+            t.c_ispeed = t2.c_ispeed;
+            t.c_ospeed = t2.c_ospeed;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for TTYPort {
@@ -176,6 +211,7 @@ impl SerialDevice for TTYPort {
             Ok(t) => t,
             Err(e) => return Err(super::error::from_io_error(e)),
         };
+        try!(self._modify_settings(&mut termios));
 
         // setup TTY for binary serial port access
         termios.c_cflag |= CREAD | CLOCAL;
@@ -189,19 +225,31 @@ impl SerialDevice for TTYPort {
         Ok(TTYSettings::new(termios))
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn write_settings(&mut self, settings: &TTYSettings) -> core::Result<()> {
-        use termios::{tcsetattr, tcflush};
-        use termios::{TCSANOW, TCIOFLUSH};
+        self._write_settings(settings)
+    }
 
-        // write settings to TTY
-        if let Err(err) = tcsetattr(self.fd, TCSANOW, &settings.termios) {
-            return Err(super::error::from_io_error(err));
+    #[cfg(target_os = "linux")]
+    fn write_settings(&mut self, settings: &TTYSettings) -> core::Result<()> {
+        use self::termios::{tcsets2, tcgets2};
+        use self::termios::os::target::{BOTHER, CBAUD};
+        try!(self._write_settings(settings));
+        if (settings.termios.c_cflag & CBAUD) == BOTHER {
+            let mut t2 = unsafe { ::std::mem::zeroed() };
+            if let Err(err) = tcgets2(self.fd, &mut t2) {
+                return Err(super::error::from_io_error(err));
+            }
+            t2.c_cflag  = settings.termios.c_cflag;
+            t2.c_ispeed = settings.termios.c_ispeed;
+            t2.c_ospeed = settings.termios.c_ospeed;
+            if let Err(err) = tcsets2(self.fd, &t2) {
+                return Err(super::error::from_io_error(err));
+            }
+            if let Err(err) = tcgets2(self.fd, &mut t2) {
+                return Err(super::error::from_io_error(err));
+            }
         }
-
-        if let Err(err) = tcflush(self.fd, TCIOFLUSH) {
-            return Err(super::error::from_io_error(err));
-        }
-
         Ok(())
     }
 
@@ -249,6 +297,40 @@ impl TTYSettings {
     fn new(termios: termios::Termios) -> Self {
         TTYSettings { termios: termios }
     }
+
+    #[cfg(target_os = "linux")]
+    fn set_custom_baud_rate(&mut self, baud: usize) -> core::Result<()> {
+        use self::termios::speed_t;
+        use self::termios::os::target::{BOTHER, CBAUD};
+        self.termios.c_cflag &= !CBAUD;
+        self.termios.c_cflag |= BOTHER;
+        self.termios.c_ispeed = baud as speed_t;
+        self.termios.c_ospeed = baud as speed_t;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn set_custom_baud_rate(&mut self, _baud: usize) -> core::Result<speed_t> {
+        Err(super::error::from_raw_os_error(self::libc::EINVAL))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn get_custom_baud_rate(&self) -> Result<Option<core::BaudRate>, ()> {
+        use self::termios::os::target::{BOTHER, CBAUD};
+        if (self.termios.c_cflag & CBAUD) == BOTHER {
+            if self.termios.c_ispeed == self.termios.c_ospeed {
+                return Ok(Some(core::BaudOther(self.termios.c_ispeed as usize)))
+            } else {
+                return Err(())
+            }
+        }
+        Ok(None)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn get_custom_baud_rate(&self) -> Result<Option<core::BaudRate>> {
+        Ok(None)
+    }
 }
 
 impl SerialPortSettings for TTYSettings {
@@ -269,66 +351,72 @@ impl SerialPortSettings for TTYSettings {
         #[cfg(target_os = "openbsd")]
         use termios::os::openbsd::{B7200, B14400, B28800, B76800};
 
-        let ospeed = cfgetospeed(&self.termios);
-        let ispeed = cfgetispeed(&self.termios);
+        match self.get_custom_baud_rate() {
+            res @ Ok(Some(_)) => res.unwrap(),
+            Err(_) => None,
+            Ok(None) => {
+                let ospeed = cfgetospeed(&self.termios);
+                let ispeed = cfgetispeed(&self.termios);
 
-        if ospeed != ispeed {
-            return None;
-        }
+                if ospeed != ispeed {
+                    return None;
+                }
 
-        match ospeed {
-            B50      => Some(core::BaudOther(50)),
-            B75      => Some(core::BaudOther(75)),
-            B110     => Some(core::Baud110),
-            B134     => Some(core::BaudOther(134)),
-            B150     => Some(core::BaudOther(150)),
-            B200     => Some(core::BaudOther(200)),
-            B300     => Some(core::Baud300),
-            B600     => Some(core::Baud600),
-            B1200    => Some(core::Baud1200),
-            B1800    => Some(core::BaudOther(1800)),
-            B2400    => Some(core::Baud2400),
-            B4800    => Some(core::Baud4800),
-            #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
-            B7200    => Some(core::BaudOther(7200)),
-            B9600    => Some(core::Baud9600),
-            #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
-            B14400   => Some(core::BaudOther(14400)),
-            B19200   => Some(core::Baud19200),
-            #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
-            B28800   => Some(core::BaudOther(28800)),
-            B38400   => Some(core::Baud38400),
-            B57600   => Some(core::Baud57600),
-            #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
-            B76800   => Some(core::BaudOther(76800)),
-            B115200  => Some(core::Baud115200),
-            B230400  => Some(core::BaudOther(230400)),
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            B460800  => Some(core::BaudOther(460800)),
-            #[cfg(target_os = "linux")]
-            B500000  => Some(core::BaudOther(500000)),
-            #[cfg(target_os = "linux")]
-            B576000  => Some(core::BaudOther(576000)),
-            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-            B921600  => Some(core::BaudOther(921600)),
-            #[cfg(target_os = "linux")]
-            B1000000 => Some(core::BaudOther(1000000)),
-            #[cfg(target_os = "linux")]
-            B1152000 => Some(core::BaudOther(1152000)),
-            #[cfg(target_os = "linux")]
-            B1500000 => Some(core::BaudOther(1500000)),
-            #[cfg(target_os = "linux")]
-            B2000000 => Some(core::BaudOther(2000000)),
-            #[cfg(target_os = "linux")]
-            B2500000 => Some(core::BaudOther(2500000)),
-            #[cfg(target_os = "linux")]
-            B3000000 => Some(core::BaudOther(3000000)),
-            #[cfg(target_os = "linux")]
-            B3500000 => Some(core::BaudOther(3500000)),
-            #[cfg(target_os = "linux")]
-            B4000000 => Some(core::BaudOther(4000000)),
+                match ospeed {
+                    B50      => Some(core::BaudOther(50)),
+                    B75      => Some(core::BaudOther(75)),
+                    B110     => Some(core::Baud110),
+                    B134     => Some(core::BaudOther(134)),
+                    B150     => Some(core::BaudOther(150)),
+                    B200     => Some(core::BaudOther(200)),
+                    B300     => Some(core::Baud300),
+                    B600     => Some(core::Baud600),
+                    B1200    => Some(core::Baud1200),
+                    B1800    => Some(core::BaudOther(1800)),
+                    B2400    => Some(core::Baud2400),
+                    B4800    => Some(core::Baud4800),
+                    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+                    B7200    => Some(core::BaudOther(7200)),
+                    B9600    => Some(core::Baud9600),
+                    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+                    B14400   => Some(core::BaudOther(14400)),
+                    B19200   => Some(core::Baud19200),
+                    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+                    B28800   => Some(core::BaudOther(28800)),
+                    B38400   => Some(core::Baud38400),
+                    B57600   => Some(core::Baud57600),
+                    #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+                    B76800   => Some(core::BaudOther(76800)),
+                    B115200  => Some(core::Baud115200),
+                    B230400  => Some(core::BaudOther(230400)),
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    B460800  => Some(core::BaudOther(460800)),
+                    #[cfg(target_os = "linux")]
+                    B500000  => Some(core::BaudOther(500000)),
+                    #[cfg(target_os = "linux")]
+                    B576000  => Some(core::BaudOther(576000)),
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    B921600  => Some(core::BaudOther(921600)),
+                    #[cfg(target_os = "linux")]
+                    B1000000 => Some(core::BaudOther(1000000)),
+                    #[cfg(target_os = "linux")]
+                    B1152000 => Some(core::BaudOther(1152000)),
+                    #[cfg(target_os = "linux")]
+                    B1500000 => Some(core::BaudOther(1500000)),
+                    #[cfg(target_os = "linux")]
+                    B2000000 => Some(core::BaudOther(2000000)),
+                    #[cfg(target_os = "linux")]
+                    B2500000 => Some(core::BaudOther(2500000)),
+                    #[cfg(target_os = "linux")]
+                    B3000000 => Some(core::BaudOther(3000000)),
+                    #[cfg(target_os = "linux")]
+                    B3500000 => Some(core::BaudOther(3500000)),
+                    #[cfg(target_os = "linux")]
+                    B4000000 => Some(core::BaudOther(4000000)),
 
-            _ => None,
+                    _ => None,
+                }
+            }
         }
     }
 
@@ -388,7 +476,6 @@ impl SerialPortSettings for TTYSettings {
     }
 
     fn set_baud_rate(&mut self, baud_rate: core::BaudRate) -> core::Result<()> {
-        use libc::EINVAL;
         use termios::cfsetspeed;
         use termios::{B50, B75, B110, B134, B150, B200, B300, B600, B1200, B1800, B2400, B4800, B9600, B19200, B38400};
         use termios::os::target::{B57600, B115200, B230400};
@@ -457,7 +544,7 @@ impl SerialPortSettings for TTYSettings {
             #[cfg(target_os = "linux")]
             core::BaudOther(4000000) => B4000000,
 
-            core::BaudOther(_) => return Err(super::error::from_raw_os_error(EINVAL)),
+            core::BaudOther(b) => return self.set_custom_baud_rate(b),
         };
 
         match cfsetspeed(&mut self.termios, baud) {
@@ -562,6 +649,15 @@ mod tests {
         settings.set_baud_rate(core::Baud600).unwrap();
         settings.set_baud_rate(core::Baud1200).unwrap();
         assert_eq!(settings.baud_rate(), Some(core::Baud1200));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn tty_settings_sets_custom_baud_rate() {
+        let mut settings = default_settings();
+
+        settings.set_baud_rate(core::BaudOther(250000)).unwrap();
+        assert_eq!(settings.baud_rate(), Some(core::BaudOther(250000)));
     }
 
     #[test]
