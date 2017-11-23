@@ -123,7 +123,7 @@ impl TTYPort {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn _modify_settings(&self, t: &mut self::termios::os::target::termios) -> core::Result<()> {Ok(())}
+    fn _modify_settings(&self, _t: &mut self::termios::os::target::termios) -> core::Result<()> {Ok(())}
 
     #[cfg(target_os = "linux")]
     fn _modify_settings(&self, t: &mut self::termios::os::target::termios) -> core::Result<()> {
@@ -310,7 +310,7 @@ impl TTYSettings {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn set_custom_baud_rate(&mut self, _baud: usize) -> core::Result<speed_t> {
+    fn set_custom_baud_rate(&mut self, _baud: usize) -> core::Result<()> {
         Err(super::error::from_raw_os_error(self::libc::EINVAL))
     }
 
@@ -328,7 +328,7 @@ impl TTYSettings {
     }
 
     #[cfg(not(target_os = "linux"))]
-    fn get_custom_baud_rate(&self) -> Result<Option<core::BaudRate>> {
+    fn get_custom_baud_rate(&self) -> Result<Option<core::BaudRate>, ()> {
         Ok(None)
     }
 }
